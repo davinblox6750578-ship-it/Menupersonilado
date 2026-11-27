@@ -14,8 +14,138 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: current
-      - run: gradle build
+      - name: Criar projeto do mod
+        run: |
+          set -e
+          mkdir -p mod/src/main/java/net/blackhole/mixin mod/src/main/resources/assets/blackhole/textures/gui
+          MC=1.21.11
+          YARN=$(curl -s https://meta.fabricmc.net/v2/versions/yarn/$MC | jq -r '.[0].version')
+          LOADER=$(curl -s https://meta.fabricmc.net/v2/versions/loader | jq -r '[.[]|select(.stable)][0].version')
+          FAPI=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/maven-metadata.xml | grep -o "<version>[^<]*+$MC</version>" | tail -1 | sed 's/<[^>]*>//g')
+          LOOM=$(curl -s https://maven.fabricmc.net/net/fabricmc/fabric-loom/maven-metadata.xml | grep -oP '(?<=<release>)[^<]+')
+          echo "yarn=$YARN loader=$LOADER fapi=$FAPI loom=$LOOM"
+          cd mod
+          cat > settings.gradle <<'EOT'
+          pluginManagement { repositories { maven { url = 'https://maven.fabricmc.net/' }; gradlePluginPortal() } }
+          EOT
+          cat > gradle.properties <<EOT
+          org.gradle.jvmargs=-Xmx2G
+          EOT
+          cat > build.gradle <<'EOT'
+          plugins { id 'fabric-loom' version 'LOOMVER' }
+          version = '1.0.0'
+          base { archivesName = 'blackhole-menu' }
+          dependencies {
+              minecraft "com.mojang:minecraft:MCVER"
+              mappings "net.fabricmc:yarn:YARNVER:v2"
+              modImplementation "net.fabricmc:fabric-loader:LOADERVER"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:FAPIVER"
+          }
+          tasks.withType(JavaCompile).configureEach { options.release = 21 }
+          java { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
+          EOT
+          sed -i "s/LOOMVER/$LOOM/;s/MCVER/$MC/;s/YARNVER/$YARN/;s/LOADERVER/$LOADER/;s/FAPIVER/$FAPI/" build.gradle
+          cat > src/main/resources/fabric.mod.json <<'EOT'
+          {
+            "schemaVersion": 1,
+            "id": "blackhole",
+            "version": "1.0.0",
+            "name": "Black Hole Menu",
+            "environment": "client",
+            "mixins": ["blackhole.mixins.json"],
+            "depends": { "fabricloader": ">=0.16.0", "minecraft": "1.21.11", "java": ">=21" }
+          }
+          EOT
+          cat > src/main/resources/blackhole.mixins.json <<'EOT'
+          {
+            "required": true,
+            "package": "net.blackhole.mixin",
+            "compatibilityLevel": "JAVA_21",
+            "client": ["ScreenMixin"],
+            "injectors": { "defaultRequire": 1 }
+          }
+          EOT
+          cat > src/main/java/net/blackhole/mixin/ScreenMixin.java <<'EOT'
+          package net.blackhole.mixin;
+
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.screen.TitleScreen;
+          import net.minecraft.client.gl.RenderPipelines;
+          import net.minecraft.util.Identifier;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          @Mixin(Screen.class)
+          public class ScreenMixin {
+              private static final Identifier BG = Identifier.of("blackhole", "textures/gui/bg.png");
+              private static final Identifier SWIRL = Identifier.of("blackhole", "textures/gui/swirl.png");
+              private static final float CX = 0.754f, CY = 0.470f;
+
+              @Inject(method = "renderPanoramaBackground", at = @At("HEAD"), cancellable = true)
+              private void blackhole$draw(DrawContext ctx, float delta, CallbackInfo ci) {
+                  if (!((Object) this instanceof TitleScreen)) return;
+                  int w = ctx.getScaledWindowWidth(), h = ctx.getScaledWindowHeight();
+                  float t = (System.currentTimeMillis() % 3_600_000L) / 1000f;
+                  blit(ctx, BG, w, h, 0xFFFFFFFF);
+                  float cx = w * CX, cy = h * CY;
+                  layer(ctx, w, h, cx, cy, (float) Math.sin(t * 0.7) * 0.06f, 0.50f);
+                  layer(ctx, w, h, cx, cy, (float) Math.sin(t * 0.45 + 2.0) * -0.09f, 0.35f);
+                  ci.cancel();
+              }
+
+              private static void layer(DrawContext ctx, int w, int h, float cx, float cy, float ang, float alpha) {
+                  var m = ctx.getMatrices();
+                  m.pushMatrix();
+                  m.translate(cx, cy);
+                  m.rotate(ang);
+                  m.translate(-cx, -cy);
+                  blit(ctx, SWIRL, w, h, ((int) (alpha * 255) << 24) | 0xFFFFFF);
+                  m.popMatrix();
+              }
+
+              private static void blit(DrawContext ctx, Identifier id, int w, int h, int color) {
+                  ctx.drawTexture(RenderPipelines.GUI_TEXTURED, id, 0, 0, 0f, 0f, w, h, 1920, 1080, 1920, 1080, color);
+              }
+          }
+          EOT
+      - name: Criar texturas a partir da sua foto
+        run: |
+          pip install pillow
+          python3 - <<'PY'
+          import glob
+          from PIL import Image, ImageDraw, ImageFilter
+          files = [f for f in glob.glob('*') if f.lower().endswith(('.webp','.png','.jpg','.jpeg'))]
+          print('foto:', files)
+          src = Image.open(files[0]).convert('RGB')
+          W, H = 1920, 1080
+          s = 0.8
+          w, h = int(W*s), int(H*s)
+          x, y = W-w, 60
+          img = src.resize((w, h), Image.LANCZOS)
+          m = Image.new('L', (w, h), 255)
+          d = ImageDraw.Draw(m)
+          d.rectangle((0, 0, 60, h), fill=0)
+          d.rectangle((0, 0, w, 40), fill=0)
+          d.rectangle((0, h-60, w, h), fill=0)
+          m = m.filter(ImageFilter.GaussianBlur(45))
+          bg = Image.new('RGB', (W, H), (0, 0, 0))
+          bg.paste(img, (x, y), m)
+          out = 'mod/src/main/resources/assets/blackhole/textures/gui/'
+          bg.save(out + 'bg.png')
+          a = Image.new('L', (W, H), 0)
+          ImageDraw.Draw(a).rectangle((int(W*0.5), 0, W, H), fill=255)
+          a = a.filter(ImageFilter.GaussianBlur(120))
+          sw = bg.convert('RGBA')
+          sw.putalpha(a)
+          sw.save(out + 'swirl.png')
+          PY
+      - name: Compilar
+        working-directory: mod
+        run: gradle build
       - uses: actions/upload-artifact@v4
         with:
           name: blackhole-menu-jar
-          path: build/libs/*.jar
+          path: mod/build/libs/*.jar
